@@ -1,0 +1,123 @@
+---
+title: "Using the Tweedieverse package for differential expression of scRNA-Seq UMI counts"
+author: "Himel Mallick"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Tweedieverse}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+This vignette highlights some example workflows for performing differential expression using `Tweedieverse` on single-cell RNA-seq (scRNA-seq) [UMI counts](https://en.wikipedia.org/wiki/Unique_molecular_identifier) (check out the related tutorial for [scRNA-seq non-UMI counts](http://htmlpreview.github.io/?https://github.com/himelmallick/TweedieLabs/blob/main/R/Tweedieverse_scRNASeq_nonUMI.html)). It should be noted that `Tweedieverse` is a sister package of [MaAsLin](https://huttenhower.sph.harvard.edu/maaslin/) which is developed by many of the same authors as this package and likewise, they share certain similarities but also important differences as described in details in the in-depth [tutorials](https://github.com/himelmallick/TweedieLabs).
+
+## Install and load packages
+
+```{r, warning=FALSE, message = FALSE}
+# Load the Tweedieverse package
+library(Tweedieverse)
+
+# Load other essential packages
+library(tidyverse)
+library(Seurat)
+
+```
+
+## Input
+
+`Tweedieverse` requires two tab-delimited input files, one for expression counts (`input_features`) and one for metadata or covariates (`input_metadata`). The rows of the `input_features` correspond to genes and the columns correspond to cells (and vice versa). Similarly, the columns of the `input_metadata` correspond to cell-specific covariates (e.g., cell types) and the rows correspond to cells.
+
+The `input_features` file can contain cells not included in the `input_metadata` file (along with the reverse case) although it is expected that they have matching cells. For both cases, cells not included in either of the files will be removed from the analysis. Also cells do not need to be in the same order in the two files as `Tweedieverse` will automatically detect the right order based on the cell names (assuming common cell IDs across files).
+
+For the purpose of this vignette, it is assumed that these two input data have already been quality-controlled with necessary preprocessing steps, e.g.,, as described in the [Seurat tutorial](https://satijalab.org/seurat/articles/essential_commands.html). For demonstration purposes, we will be using a cleaned version of the PBMC dataset (freely available from the [10x genomics website](https://s3-us-west-2.amazonaws.com/10x.files/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz)) that was pre-processed using [`Seurat`](https://satijalab.org/seurat/). The pre-computed `Seurat` object can be downloaded from [here](https://www.dropbox.com/s/63gnlw45jf7cje8/pbmc3k_final.rds?dl=1). 
+
+```{r, warning=FALSE, message = FALSE}
+
+# Download file
+download.file("https://www.dropbox.com/s/63gnlw45jf7cje8/pbmc3k_final.rds?dl=1", "pbmc3k_final.rds")
+
+# Load the PBMC Seurat object 
+pbmc <- readRDS(file = "pbmc3k_final.rds")
+
+# Subset to CD4 and CD8 cell types
+keepcells = as.integer(pbmc@active.ident) %in% c(1, 2, 5)
+
+# Extract expression counts
+counts = pbmc@assays$RNA@counts[, keepcells]
+counts = as.matrix(counts)
+
+# Extract covariate (celltype) information
+clusters = as.integer(pbmc@active.ident)
+clusters = clusters[clusters %in% c(1, 2, 5)]
+cData = data.frame(seurat = clusters)
+cData$seurat<-ifelse(cData$seurat==5, 'CD8', 'CD4')
+rownames(cData) = colnames(counts)
+
+# Prepare data for Tweedieverse
+input_features<-as.data.frame(t(counts))
+input_metadata<-cData
+names(input_metadata)<-'CellType'
+input_metadata$CellType<-as.factor(input_metadata$CellType)
+input_metadata$CellType<-factor(input_metadata$CellType, levels = c('CD8', 'CD4'))
+
+# Take a quick look at the data
+head(input_features[1:5, 1:5])
+head(input_metadata)
+
+# Calculate sparsity (percentage of zeroes)
+round(sum(input_features==0)/(nrow(input_features)*ncol(input_features))*100, 1)
+
+```
+
+For brevity, we will consider top 100 most variable genes. 
+```{r, warning=FALSE, message = FALSE}
+sds<-apply(input_features, 2, function(x){sd(x, na.rm = TRUE)})
+top_n_IDs<-order(sds, decreasing = TRUE)[1:100]
+input_features<-input_features[, top_n_IDs]
+dim(input_features)
+```
+
+## Normalization
+
+For normalization, Tweedieverse expects a variable named `scale_factor` in the `input_metadata` file which is included as an offset in the base model when prompted (i.e. `adjust_offset = TRUE`). If not found in metadata, Tweedieverse, by default, includes the library size as an offset in the model (unless `adjust_offset = FALSE`). Here we use the CPLM base model with library size normalization (see the related tutorial for [non-UMI counts](http://htmlpreview.github.io/?https://github.com/himelmallick/TweedieLabs/blob/main/R/Tweedieverse_scRNASeq_nonUMI.html) for using other normalization methods).
+
+## Differential Expression
+
+```{r, warning=FALSE, message = FALSE}
+if (!dir.exists('demo_output')) dir.create('demo_output')
+PBMC <- Tweedieverse(
+  input_features,
+  input_metadata, 
+  output = 'demo_output/PBMC', # Assuming demo_output exists
+  fixed_effects = c('CellType'),
+  base_model = 'CPLM',
+  adjust_offset = TRUE)
+```
+
+## Output
+
+After computation, `PBMC` is a data frame containing coefficient estimates, p-values, and q-values (multiplicity-adjusted p-values) along with other parameter estimates from the fitted per-feature models. By default, p-values are adjusted with the Benjamini-Hochberg method.
+
+
+```{r}
+# Table with DE analysis results
+head(PBMC)
+
+# How many significant at 5% FDR
+nrow(PBMC[PBMC$qval<0.05,]) # 82
+```
+
+Using the adjusted p-values, there are 82 genes significant at 5% FDR.
+
+## Session information
+
+```{r}
+sessionInfo()
+```

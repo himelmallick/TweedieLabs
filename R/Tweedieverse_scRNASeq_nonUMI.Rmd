@@ -1,0 +1,117 @@
+---
+title: "Using Tweedieverse for differential expression of scRNA-Seq non-UMI counts"
+author: "Himel Mallick"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Tweedieverse}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+This vignette highlights some example workflows for performing differential expression using `Tweedieverse` on single-cell RNA-seq (scRNA-seq) non-UMI counts (check out the related tutorial for [scRNA-seq UMI counts](http://htmlpreview.github.io/?https://github.com/himelmallick/TweedieLabs/blob/main/R/Tweedieverse_scRNASeq_UMI.html)). It should be noted that `Tweedieverse` is a sister package of [MaAsLin](https://huttenhower.sph.harvard.edu/maaslin/) which is developed by many of the same authors as this package and likewise, they share certain similarities but also important differences as described in the in-depth [tutorials](https://github.com/himelmallick/TweedieLabs).
+
+## Install and load packages
+
+```{r, warning=FALSE, message = FALSE}
+# Load the Tweedieverse package
+library(Tweedieverse)
+
+# Load other essential packages
+library(tidyverse)
+library(SC2P) # library(devtools); devtools::install_github('haowulab/SC2P')
+
+```
+
+## Input
+
+`Tweedieverse` requires two tab-delimited input files, one for expression counts (`input_features`) and one for metadata or covariates (`input_metadata`). The rows of the `input_features` correspond to genes and the columns correspond to cells (and vice versa). Similarly, the columns of the `input_metadata` correspond to cell-specific covariates (e.g., cell types) and the rows correspond to cells.
+
+The `input_features` file can contain cells not included in the `input_metadata` file (along with the reverse case) although it is expected that they have matching cells. For both cases, cells not included in either of the files will be removed from the analysis. Also cells do not need to be in the same order in the two files as `Tweedieverse` will automatically detect the right order based on the cell names (assuming common cell IDs across files).
+
+For the purpose of this vignette, it is assumed that these two input data have already been quality-controlled with necessary preprocessing steps, e.g.,, as described in the [Seurat tutorial](https://satijalab.org/seurat/articles/essential_commands.html). For demonstration purposes, we will be using a cleaned version of the Brain dataset (available from the R package [SC2P](https://github.com/haowulab/SC2P)). The original  dataset is available from the Gene Expression Omnibus database under accession number [GSE67835](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE67835).
+
+```{r, warning=FALSE, message = FALSE}
+# Load data
+data(brain_scRNAseq)
+colnames(Y) <- rownames(design)
+
+# Prepare data for Tweedieverse
+input_features<-as.data.frame(t(Y))
+input_metadata<-design
+cellIDs<-paste('Cell', 1:nrow(input_features), sep ='')
+rownames(input_metadata)<-rownames(input_features)<-cellIDs # Arbitrary Names
+
+# Take a quick look at the data
+head(input_features[1:5, 1:5])
+head(input_metadata[1:5, 1:5])
+
+# Calculate sparsity (percentage of zeroes)
+round(sum(input_features==0)/(nrow(input_features)*ncol(input_features))*100, 1)
+
+```
+For brevity, we will consider top 100 most variable genes. 
+```{r, warning=FALSE, message = FALSE}
+sds<-apply(input_features, 2, function(x){sd(x, na.rm = TRUE)})
+top_n_IDs<-order(sds, decreasing = TRUE)[1:100]
+input_features<-input_features[, top_n_IDs]
+dim(input_features)
+```
+
+## Normalization
+
+For normalization, Tweedieverse expects a variable named `scale_factor` in the `input_metadata` file which is included as an offset in the base model when prompted (i.e. `adjust_offset = TRUE`). If not found in metadata, Tweedieverse, by default, includes the library size as an offset in the model (unless `adjust_offset = FALSE`). Here we use the ZICP base model with [**`scran`**](https://bioconductor.org/packages/release/bioc/html/scran.html) normalization (see the related tutorial for [UMI counts](http://htmlpreview.github.io/?https://github.com/himelmallick/TweedieLabs/blob/main/R/Tweedieverse_scRNASeq_UMI.html) for using library size normalization).
+
+```{r, warning=FALSE, message = FALSE}
+
+# Load library
+library(scran) 
+
+# SCRAN normalization
+sce<-t(input_features)
+scale_factor <- scran::calculateSumFactors(sce)
+input_metadata$scale_factor<-scale_factor
+```
+
+## Differential Expression
+
+```{r, warning=FALSE, message = FALSE}
+if (!dir.exists('demo_output')) dir.create('demo_output')
+Brain <- Tweedieverse(
+  input_features,
+  input_metadata, 
+  output = 'demo_output/Brain', # Assuming demo_output exists
+  fixed_effects = c('celltype'),
+  base_model = 'ZICP',
+  standardize = FALSE,
+  adjust_offset = TRUE)
+```
+
+## Output
+
+After computation, `Brain` is a data frame containing coefficient estimates, p-values, and q-values (multiplicity-adjusted p-values) along with other parameter estimates from the fitted per-feature models. By default, p-values are adjusted with the Benjamini-Hochberg method.
+
+
+```{r}
+# Table with DE analysis results
+head(Brain)
+
+# How many significant at 5% FDR
+nrow(Brain[Brain$qval<0.05,]) # 85
+```
+
+Using the adjusted p-values, there are 85 genes significant at 5% FDR.
+
+## Session information
+
+```{r}
+sessionInfo()
+```
+
